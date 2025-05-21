@@ -1,6 +1,6 @@
 from flask import Flask, request, abort
 from linebot.v3 import WebhookHandler
-from linebot.v3.exceptions import InvalidSignatureError
+from linebot.v3.exceptions import InvalidSignatureError, LineBotApiError
 from linebot.v3.webhooks import MessageEvent, TextMessageContent, JoinEvent
 from linebot.v3.messaging import Configuration, ApiClient, MessagingApi, ReplyMessageRequest, TextMessage
 import google.generativeai as genai
@@ -8,9 +8,14 @@ import requests
 import json
 import os
 import logging
+import traceback
+import time
 
-# 配置日誌
-logging.basicConfig(level=logging.INFO)
+# 配置詳細的日誌
+logging.basicConfig(
+    level=logging.DEBUG,  # 更改為 DEBUG 級別以獲取更多詳細資訊
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 # 從環境變數獲取敏感信息，如果沒有則使用默認值（僅用於本地開發）
@@ -38,6 +43,7 @@ OPENWEATHERMAP_API_BASE_URL = 'https://api.openweathermap.org/data/2.5/weather'
 app = Flask(__name__)
 
 # 設定 LINE Messaging API 用戶端
+logger.info(f"使用的 LINE Channel Access Token: {LINE_CHANNEL_ACCESS_TOKEN[:10]}...{LINE_CHANNEL_ACCESS_TOKEN[-10:]}")
 configuration = Configuration(
     access_token=LINE_CHANNEL_ACCESS_TOKEN
 )
@@ -173,6 +179,47 @@ def search_movies(query):
         logger.error(f"解析電影資料時發生錯誤：{e}")
         return f"解析電影資料時發生錯誤：{e}"
 
+def send_reply(reply_token, messages, max_retries=3):
+    """發送回覆訊息，具有重試機制"""
+    retry_count = 0
+    
+    while retry_count < max_retries:
+        try:
+            logger.info(f"嘗試發送回覆，第 {retry_count + 1} 次嘗試")
+            logger.debug(f"回覆令牌: {reply_token}")
+            logger.debug(f"訊息內容: {messages}")
+            
+            response = line_bot_api.reply_message_with_http_info(
+                ReplyMessageRequest(
+                    reply_token=reply_token,
+                    messages=messages
+                )
+            )
+            
+            logger.info(f"成功回覆訊息，HTTP狀態: {response[1]}")
+            return True
+            
+        except LineBotApiError as e:
+            logger.error(f"LINE API 錯誤: {e.status_code} {e.error.message}")
+            logger.error(f"詳細錯誤: {e.error.details if hasattr(e.error, 'details') else 'No details'}")
+            
+            # 根據錯誤類型決定是否重試
+            if e.status_code in [400, 403, 429]:  # 400錯誤請求, 403無訪問權限, 429請求過多
+                logger.error("由於錯誤類型，不再重試")
+                return False
+                
+        except Exception as e:
+            logger.error(f"回覆訊息時發生未知錯誤: {e}")
+            logger.error(traceback.format_exc())
+        
+        # 等待一段時間後重試
+        retry_count += 1
+        if retry_count < max_retries:
+            time.sleep(1)  # 1秒後重試
+    
+    logger.error(f"在 {max_retries} 次嘗試後無法發送回覆")
+    return False
+
 @app.route("/callback", methods=['POST'])
 def callback():
     """LINE Bot 的 Webhook 接收端點"""
@@ -197,6 +244,7 @@ def callback():
         abort(400)
     except Exception as e:
         logger.error(f"處理 webhook 時發生錯誤: {e}")
+        logger.error(traceback.format_exc())
         abort(500)
 
     return 'OK'
@@ -208,6 +256,20 @@ def handle_message(event):
     
     user_id = event.source.user_id
     message_text = event.message.text
+    reply_token = event.reply_token
+    
+    logger.info(f"從用戶 {user_id} 收到消息: {message_text}")
+    logger.info(f"回覆令牌: {reply_token}")
+
+    # 直接回覆測試訊息
+    if message_text.lower() == "ping":
+        logger.info("收到 ping 測試訊息，立即回覆")
+        result = send_reply(reply_token, [TextMessage(text="pong! 我在這裡！")])
+        if result:
+            logger.info("測試訊息回覆成功")
+        else:
+            logger.error("測試訊息回覆失敗")
+        return
 
     # 取得或初始化使用者的對話歷史
     if user_id not in user_context:
@@ -217,6 +279,7 @@ def handle_message(event):
     if "新聞" in message_text or "最新消息" in message_text:
         query = message_text.replace("新聞", "").replace("最新消息", "").strip()
         if query:
+            logger.info(f"開始查詢新聞關鍵字: {query}")
             news_result = get_news(query)
             reply = f"查詢「{query}」的新聞結果如下：\n\n{news_result}"
         else:
@@ -227,6 +290,7 @@ def handle_message(event):
     elif "天氣" in message_text:
         city = message_text.replace("天氣", "").strip()
         if city:
+            logger.info(f"開始查詢城市天氣: {city}")
             weather_result = get_weather(city)
             reply = weather_result
         else:
@@ -237,6 +301,7 @@ def handle_message(event):
     elif "電影" in message_text:
         query = message_text.replace("電影", "").strip()
         if query:
+            logger.info(f"開始查詢電影: {query}")
             movie_result = search_movies(query)
             reply = f"查詢「{query}」的電影結果如下：\n\n{movie_result}"
         else:
@@ -249,42 +314,38 @@ def handle_message(event):
 
         # 取得 Gemini 的回覆
         try:
+            logger.info("開始與 Gemini 模型對話")
             response = gemini_model.generate_content(user_context[user_id])
             gemini_reply = response.text
+            logger.info(f"從 Gemini 收到回覆: {gemini_reply[:100]}...")
             user_context[user_id].append({"role": "model", "parts": [gemini_reply]})
             messages = [TextMessage(text=gemini_reply)]
         except Exception as e:
             logger.error(f"Gemini 發生錯誤：{e}")
-            reply = f"抱歉，Gemini 發生錯誤：{e}"
+            logger.error(traceback.format_exc())
+            reply = f"抱歉，Gemini 發生錯誤：{str(e)[:100]}"
             messages = [TextMessage(text=reply)]
 
     # 回覆訊息給使用者
-    try:
-        line_bot_api.reply_message(
-            ReplyMessageRequest(
-                reply_token=event.reply_token,
-                messages=messages
-            )
-        )
+    logger.info(f"準備回覆訊息: {str(messages)[:200]}")
+    result = send_reply(reply_token, messages)
+    if result:
         logger.info("成功回覆訊息")
-    except Exception as e:
-        logger.error(f"回覆訊息時發生錯誤：{e}")
+    else:
+        logger.error("回覆訊息失敗")
 
 @handler.add(JoinEvent)
 def handle_group_join(event):
     """處理機器人加入群組事件"""
     logger.info(f"處理群組加入事件: {event}")
+    reply_token = event.reply_token
     reply_message = TextMessage(text="大家好！很高興加入這個群組。請隨時吩咐我查詢新聞、天氣或電影資訊喔！")
-    try:
-        line_bot_api.reply_message(
-            ReplyMessageRequest(
-                reply_token=event.reply_token,
-                messages=[reply_message]
-            )
-        )
+    
+    result = send_reply(reply_token, [reply_message])
+    if result:
         logger.info("成功回覆加入群組訊息")
-    except Exception as e:
-        logger.error(f"回覆加入群組訊息時發生錯誤：{e}")
+    else:
+        logger.error("回覆加入群組訊息失敗")
 
 # 在群組中接收訊息
 @handler.add(MessageEvent, message=TextMessageContent)
@@ -298,11 +359,13 @@ def handle_group_message(event):
     group_id = event.source.group_id
     user_id = event.source.user_id
     message_text = event.message.text
+    reply_token = event.reply_token
     
     # 只處理以特定前綴開頭的訊息，避免機器人回應所有群組訊息
     if message_text.startswith('@機器人') or message_text.startswith('@bot'):
         # 移除前綴
         query = message_text.replace('@機器人', '').replace('@bot', '').strip()
+        logger.info(f"從群組用戶 {user_id} 收到有效指令: {query}")
         
         # 判斷查詢類型並處理
         if "新聞" in query:
@@ -337,19 +400,16 @@ def handle_group_message(event):
                 reply = response.text
             except Exception as e:
                 logger.error(f"Gemini 發生錯誤：{e}")
-                reply = f"抱歉，Gemini 發生錯誤：{e}"
+                logger.error(traceback.format_exc())
+                reply = f"抱歉，Gemini 發生錯誤：{str(e)[:100]}"
         
         # 回覆訊息給群組
-        try:
-            line_bot_api.reply_message(
-                ReplyMessageRequest(
-                    reply_token=event.reply_token,
-                    messages=[TextMessage(text=reply)]
-                )
-            )
+        logger.info(f"準備回覆群組訊息: {reply[:100]}...")
+        result = send_reply(reply_token, [TextMessage(text=reply)])
+        if result:
             logger.info("成功回覆群組訊息")
-        except Exception as e:
-            logger.error(f"回覆群組訊息時發生錯誤：{e}")
+        else:
+            logger.error("回覆群組訊息失敗")
 
 if __name__ == "__main__":
     # 本地開發使用 debug 模式，生產環境中不使用
