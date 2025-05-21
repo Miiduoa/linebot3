@@ -7,6 +7,11 @@ import google.generativeai as genai
 import requests
 import json
 import os
+import logging
+
+# 配置日誌
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # 從環境變數獲取敏感信息，如果沒有則使用默認值（僅用於本地開發）
 # LINE Bot 設定
@@ -14,7 +19,7 @@ LINE_CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN', 'G5/Jatw
 LINE_CHANNEL_SECRET = os.environ.get('LINE_CHANNEL_SECRET', 'ff89f01585f2b68301b8f8911174cd87')
 
 # Google Gemini API 設定
-GOOGLE_GEMINI_API_KEY = os.environ.get('GOOGLE_GEMINI_API_KEY', 'AlzaSyBWCitsjkm7DPe_aREubKIZjqmgXafVKNE')
+GOOGLE_GEMINI_API_KEY = os.environ.get('GOOGLE_GEMINI_API_KEY', 'AIzaSyBWCitsjkm7DPe_aREubKIZjqmgXafVKNE')
 genai.configure(api_key=GOOGLE_GEMINI_API_KEY)
 gemini_model = genai.GenerativeModel('gemini-pro')
 
@@ -45,6 +50,15 @@ handler = WebhookHandler(LINE_CHANNEL_SECRET)
 # 簡單的上下文記憶體 (userID -> 對話歷史列表)
 user_context = {}
 
+# 添加根路由和健康檢查
+@app.route('/', methods=['GET'])
+def index():
+    return '歡迎使用 LINE 聊天機器人！服務正常運行中。'
+
+@app.route("/health", methods=['GET'])
+def health():
+    return {"status": "ok"}, 200
+
 def get_news(query):
     """使用 NewsAPI 查詢新聞"""
     params = {
@@ -68,8 +82,10 @@ def get_news(query):
         else:
             return "抱歉，找不到相關新聞。"
     except requests.exceptions.RequestException as e:
+        logger.error(f"查詢新聞時發生錯誤：{e}")
         return f"查詢新聞時發生錯誤：{e}"
     except json.JSONDecodeError as e:
+        logger.error(f"解析新聞資料時發生錯誤：{e}")
         return f"解析新聞資料時發生錯誤：{e}"
 
 def get_weather(city):
@@ -102,10 +118,13 @@ def get_weather(city):
         )
         return weather_info
     except requests.exceptions.RequestException as e:
+        logger.error(f"查詢天氣時發生錯誤：{e}")
         return f"查詢天氣時發生錯誤：{e}"
     except KeyError:
+        logger.error(f"找不到該城市的天氣資訊")
         return "抱歉，找不到該城市的天氣資訊。請確認城市名稱是否正確。"
     except json.JSONDecodeError as e:
+        logger.error(f"解析天氣資料時發生錯誤：{e}")
         return f"解析天氣資料時發生錯誤：{e}"
 
 def search_movies(query):
@@ -148,30 +167,45 @@ def search_movies(query):
         else:
             return f"抱歉，找不到與「{query}」相關的電影。"
     except requests.exceptions.RequestException as e:
+        logger.error(f"查詢電影時發生錯誤：{e}")
         return f"查詢電影時發生錯誤：{e}"
     except json.JSONDecodeError as e:
+        logger.error(f"解析電影資料時發生錯誤：{e}")
         return f"解析電影資料時發生錯誤：{e}"
 
 @app.route("/callback", methods=['POST'])
 def callback():
     """LINE Bot 的 Webhook 接收端點"""
-    signature = request.headers['X-Line-Signature']
+    # 記錄請求數據以進行調試
+    logger.info(f"收到 Webhook 請求，headers: {request.headers}")
+    
+    try:
+        signature = request.headers['X-Line-Signature']
+    except KeyError:
+        logger.error("缺少 X-Line-Signature 頭部")
+        return "缺少簽名", 400
 
     # get request body as text
     body = request.get_data(as_text=True)
-    app.logger.info("Request body: " + body)
+    logger.info(f"Request body: {body}")
 
     # handle webhook body
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
+        logger.error("無效的簽名")
         abort(400)
+    except Exception as e:
+        logger.error(f"處理 webhook 時發生錯誤: {e}")
+        abort(500)
 
     return 'OK'
 
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
     """處理文字訊息"""
+    logger.info(f"處理訊息事件: {event}")
+    
     user_id = event.source.user_id
     message_text = event.message.text
 
@@ -220,27 +254,37 @@ def handle_message(event):
             user_context[user_id].append({"role": "model", "parts": [gemini_reply]})
             messages = [TextMessage(text=gemini_reply)]
         except Exception as e:
+            logger.error(f"Gemini 發生錯誤：{e}")
             reply = f"抱歉，Gemini 發生錯誤：{e}"
             messages = [TextMessage(text=reply)]
 
     # 回覆訊息給使用者
-    line_bot_api.reply_message(
-        ReplyMessageRequest(
-            reply_token=event.reply_token,
-            messages=messages
+    try:
+        line_bot_api.reply_message(
+            ReplyMessageRequest(
+                reply_token=event.reply_token,
+                messages=messages
+            )
         )
-    )
+        logger.info("成功回覆訊息")
+    except Exception as e:
+        logger.error(f"回覆訊息時發生錯誤：{e}")
 
 @handler.add(JoinEvent)
 def handle_group_join(event):
     """處理機器人加入群組事件"""
+    logger.info(f"處理群組加入事件: {event}")
     reply_message = TextMessage(text="大家好！很高興加入這個群組。請隨時吩咐我查詢新聞、天氣或電影資訊喔！")
-    line_bot_api.reply_message(
-        ReplyMessageRequest(
-            reply_token=event.reply_token,
-            messages=[reply_message]
+    try:
+        line_bot_api.reply_message(
+            ReplyMessageRequest(
+                reply_token=event.reply_token,
+                messages=[reply_message]
+            )
         )
-    )
+        logger.info("成功回覆加入群組訊息")
+    except Exception as e:
+        logger.error(f"回覆加入群組訊息時發生錯誤：{e}")
 
 # 在群組中接收訊息
 @handler.add(MessageEvent, message=TextMessageContent)
@@ -249,6 +293,8 @@ def handle_group_message(event):
     if not hasattr(event.source, 'group_id'):
         return  # 跳過非群組訊息
 
+    logger.info(f"處理群組訊息事件: {event}")
+    
     group_id = event.source.group_id
     user_id = event.source.user_id
     message_text = event.message.text
@@ -290,15 +336,20 @@ def handle_group_message(event):
                 response = gemini_model.generate_content(gemini_context)
                 reply = response.text
             except Exception as e:
+                logger.error(f"Gemini 發生錯誤：{e}")
                 reply = f"抱歉，Gemini 發生錯誤：{e}"
         
         # 回覆訊息給群組
-        line_bot_api.reply_message(
-            ReplyMessageRequest(
-                reply_token=event.reply_token,
-                messages=[TextMessage(text=reply)]
+        try:
+            line_bot_api.reply_message(
+                ReplyMessageRequest(
+                    reply_token=event.reply_token,
+                    messages=[TextMessage(text=reply)]
+                )
             )
-        )
+            logger.info("成功回覆群組訊息")
+        except Exception as e:
+            logger.error(f"回覆群組訊息時發生錯誤：{e}")
 
 if __name__ == "__main__":
     # 本地開發使用 debug 模式，生產環境中不使用
