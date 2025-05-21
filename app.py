@@ -1,6 +1,6 @@
 from flask import Flask, request, abort
 from linebot.v3 import WebhookHandler
-from linebot.v3.exceptions import InvalidSignatureError, LineBotApiError
+from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.webhooks import MessageEvent, TextMessageContent, JoinEvent
 from linebot.v3.messaging import Configuration, ApiClient, MessagingApi, ReplyMessageRequest, TextMessage
 import google.generativeai as genai
@@ -64,6 +64,34 @@ def index():
 @app.route("/health", methods=['GET'])
 def health():
     return {"status": "ok"}, 200
+
+@app.route("/test", methods=['GET'])
+def test():
+    """簡單的測試路由，幫助檢查應用是否正常運行以及依賴項是否正確安裝"""
+    try:
+        # 測試 LINE Bot SDK
+        handler_test = WebhookHandler("test_secret")
+        line_config = Configuration(access_token="test_token")
+        api_client = ApiClient(line_config)
+        
+        # 測試 Gemini API
+        genai_status = "可用" if GOOGLE_GEMINI_API_KEY.startswith("AIza") else "金鑰格式不正確"
+        
+        return {
+            "status": "線上",
+            "flask": "正常",
+            "line_bot_sdk": "已加載",
+            "gemini_api": genai_status,
+            "python_version": os.sys.version,
+            "environment": "production" if not app.debug else "development"
+        }, 200
+        
+    except Exception as e:
+        return {
+            "status": "錯誤",
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }, 500
 
 def get_news(query):
     """使用 NewsAPI 查詢新聞"""
@@ -199,23 +227,14 @@ def send_reply(reply_token, messages, max_retries=3):
             logger.info(f"成功回覆訊息，HTTP狀態: {response[1]}")
             return True
             
-        except LineBotApiError as e:
-            logger.error(f"LINE API 錯誤: {e.status_code} {e.error.message}")
-            logger.error(f"詳細錯誤: {e.error.details if hasattr(e.error, 'details') else 'No details'}")
-            
-            # 根據錯誤類型決定是否重試
-            if e.status_code in [400, 403, 429]:  # 400錯誤請求, 403無訪問權限, 429請求過多
-                logger.error("由於錯誤類型，不再重試")
-                return False
-                
         except Exception as e:
-            logger.error(f"回覆訊息時發生未知錯誤: {e}")
+            logger.error(f"回覆訊息時發生錯誤: {e}")
             logger.error(traceback.format_exc())
-        
-        # 等待一段時間後重試
-        retry_count += 1
-        if retry_count < max_retries:
-            time.sleep(1)  # 1秒後重試
+            
+            # 等待一段時間後重試
+            retry_count += 1
+            if retry_count < max_retries:
+                time.sleep(1)  # 1秒後重試
     
     logger.error(f"在 {max_retries} 次嘗試後無法發送回覆")
     return False
@@ -413,5 +432,5 @@ def handle_group_message(event):
 
 if __name__ == "__main__":
     # 本地開發使用 debug 模式，生產環境中不使用
-    port = int(os.environ.get('PORT', 5000))
+    port = int(os.environ.get('PORT', 8080))  # 使用 8080 作為默認端口
     app.run(host='0.0.0.0', port=port, debug=False)
