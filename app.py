@@ -10,6 +10,7 @@ import os
 import logging
 import traceback
 import time
+import linebot
 
 # 配置詳細的日誌
 logging.basicConfig(
@@ -42,13 +43,11 @@ OPENWEATHERMAP_API_BASE_URL = 'https://api.openweathermap.org/data/2.5/weather'
 
 app = Flask(__name__)
 
-# 設定 LINE Messaging API 用戶端
+# 設定 LINE Messaging API 用戶端 - 全局配置對象
 logger.info(f"使用的 LINE Channel Access Token: {LINE_CHANNEL_ACCESS_TOKEN[:10]}...{LINE_CHANNEL_ACCESS_TOKEN[-10:]}")
 configuration = Configuration(
     access_token=LINE_CHANNEL_ACCESS_TOKEN
 )
-api_client = ApiClient(configuration)
-line_bot_api = MessagingApi(api_client)
 
 # 設定 Webhook 處理器
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
@@ -87,6 +86,44 @@ def test():
         }, 200
         
     except Exception as e:
+        return {
+            "status": "錯誤",
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }, 500
+
+@app.route("/send_test", methods=['GET'])
+def send_test():
+    """測試直接發送訊息給指定用戶 ID"""
+    try:
+        user_id = request.args.get('user_id')
+        message = request.args.get('message', '這是一條測試訊息')
+        
+        if not user_id:
+            return {"error": "缺少 user_id 參數"}, 400
+            
+        logger.info(f"嘗試直接發送測試訊息給用戶 {user_id}: {message}")
+        
+        with ApiClient(configuration) as api_client:
+            line_bot_api = MessagingApi(api_client)
+            from linebot.v3.messaging import PushMessageRequest
+            
+            response = line_bot_api.push_message(
+                PushMessageRequest(
+                    to=user_id,
+                    messages=[TextMessage(text=message)]
+                )
+            )
+            
+        return {
+            "status": "成功",
+            "message": f"訊息已發送給用戶 {user_id}"
+        }, 200
+        
+    except Exception as e:
+        logger.error(f"發送測試訊息時發生錯誤: {e}")
+        logger.error(traceback.format_exc())
+        
         return {
             "status": "錯誤",
             "error": str(e),
@@ -217,18 +254,42 @@ def send_reply(reply_token, messages, max_retries=3):
             logger.debug(f"回覆令牌: {reply_token}")
             logger.debug(f"訊息內容: {messages}")
             
-            response = line_bot_api.reply_message_with_http_info(
-                ReplyMessageRequest(
-                    reply_token=reply_token,
-                    messages=messages
+            # 根據官方範例的正確用法
+            with ApiClient(configuration) as api_client:
+                line_bot_api = MessagingApi(api_client)
+                response = line_bot_api.reply_message(
+                    ReplyMessageRequest(
+                        reply_token=reply_token,
+                        messages=messages
+                    )
                 )
-            )
             
-            logger.info(f"成功回覆訊息，HTTP狀態: {response[1]}")
+            logger.info(f"成功回覆訊息")
             return True
             
+        except linebot.v3.messaging.ApiException as e:
+            # 處理 LINE API 的特定錯誤
+            logger.error(f"LINE API 錯誤 (狀態碼: {e.status}): {e.reason}")
+            
+            # 嘗試取得詳細的錯誤訊息
+            try:
+                error_detail = json.loads(e.body)
+                logger.error(f"錯誤細節: {error_detail}")
+            except:
+                logger.error(f"無法解析錯誤詳情: {e.body}")
+                
+            # 檢查是否為令牌相關問題（過期或已使用）
+            if e.status == 400 and "Invalid reply token" in str(e.body):
+                logger.error("無效的回覆令牌 - 可能已過期或已被使用")
+                return False
+                
+            # 對於其他錯誤，繼續重試
+            retry_count += 1
+            if retry_count < max_retries:
+                time.sleep(1)  # 1秒後重試
+                
         except Exception as e:
-            logger.error(f"回覆訊息時發生錯誤: {e}")
+            logger.error(f"回覆訊息時發生一般錯誤: {e}")
             logger.error(traceback.format_exc())
             
             # 等待一段時間後重試
