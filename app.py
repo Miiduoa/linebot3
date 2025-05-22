@@ -2,6 +2,7 @@ from flask import Flask, request, abort
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.messaging import Configuration, ApiClient, MessagingApi, ReplyMessageRequest, TextMessage
+from linebot.v3.webhooks import MessageEvent, TextMessageContent, GroupJoinEvent
 import google.generativeai as genai
 import requests
 import json
@@ -87,7 +88,7 @@ def callback():
 
     return 'OK'
 
-@handler.add(message_content_type='text')
+@handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
     """處理文字訊息"""
     user_id = event.source.user_id
@@ -128,7 +129,7 @@ def handle_message(event):
         )
     )
 
-@handler.add(message_content_type='group_join')
+@handler.add(GroupJoinEvent)
 def handle_group_join(event):
     """處理機器人加入群組事件"""
     reply_message = TextMessage(text="大家好！很高興加入這個群組。請隨時吩咐我查詢新聞、天氣或電影資訊喔！")
@@ -139,12 +140,13 @@ def handle_group_join(event):
         )
     )
 
-# 在群組中接收訊息 (需要額外處理，這裡先留空)
-@handler.add(message_content_type='text', message_source_type='group')
+# 在群組中接收訊息
+@handler.add(MessageEvent, message=TextMessageContent)
 def handle_group_message(event):
     """處理群組中的文字訊息"""
-    # TODO: 將群組訊息加入 Gemini 的上下文
-    pass
+    if event.source.type == 'group':
+        # 使用與一般訊息相同的處理邏輯
+        handle_message(event)
 
 if __name__ == "__main__":
     port = int(os.environ.get('PORT', 5000))
