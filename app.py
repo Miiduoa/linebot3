@@ -1,7 +1,7 @@
 from flask import Flask, request, abort
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
-from linebot.v3.messaging import Configuration, ApiClient, ReplyMessageRequest, TextMessage
+from linebot.v3.messaging import Configuration, ApiClient, MessagingApi, ReplyMessageRequest, TextMessage
 import google.generativeai as genai
 import requests
 import json
@@ -34,7 +34,8 @@ app = Flask(__name__)
 configuration = Configuration(
     access_token=LINE_CHANNEL_ACCESS_TOKEN
 )
-line_bot_api = ApiClient(configuration).api
+api_client = ApiClient(configuration)
+line_bot_api = MessagingApi(api_client)
 
 # 設定 Webhook 處理器
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
