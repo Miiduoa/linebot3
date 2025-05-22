@@ -1,7 +1,7 @@
 from flask import Flask, request, abort
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
-from linebot.v3.webhooks import MessageEvent, TextMessageContent, JoinEvent
+from linebot.v3.webhooks import MessageEvent, TextMessageContent, JoinEvent, FollowEvent
 from linebot.v3.messaging import Configuration, ApiClient, MessagingApi, ReplyMessageRequest, TextMessage
 import google.generativeai as genai
 import requests
@@ -426,6 +426,32 @@ def handle_group_join(event):
         logger.info("成功回覆加入群組訊息")
     else:
         logger.error("回覆加入群組訊息失敗")
+
+@handler.add(FollowEvent)
+def handle_follow(event):
+    """處理加好友事件"""
+    logger.info(f"處理加好友事件: {event}")
+    reply_token = event.reply_token
+    user_id = event.source.user_id
+    logger.info(f"用戶 {user_id} 已將機器人加為好友或解除封鎖")
+
+    # 發送歡迎訊息
+    welcome_message = TextMessage(text="感謝您加我為好友！您可以問我新聞、天氣或電影資訊，也可以直接跟我聊天喔！")
+    result = send_reply(reply_token, [welcome_message])
+    if result:
+        logger.info("成功發送歡迎訊息")
+    else:
+        logger.error("發送歡迎訊息失敗")
+
+@handler.default()
+def default_handler(event):
+    """處理所有未被明確處理的事件"""
+    logger.info(f"收到未處理的事件: {event}")
+    # 可以選擇性地回覆一個通用訊息，或是不做任何事
+    # reply_token = event.reply_token
+    # if reply_token:
+    #     send_reply(reply_token, [TextMessage(text="抱歉，我不太明白您的意思。")])
+    pass
 
 # 在群組中接收訊息
 @handler.add(MessageEvent, message=TextMessageContent)
