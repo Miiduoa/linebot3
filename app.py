@@ -331,18 +331,42 @@ def callback():
 
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
-    """處理文字訊息"""
+    """統一處理文字訊息 (包含私訊和群組訊息)"""
     logger.info(f"處理訊息事件: {event}")
-    
-    user_id = event.source.user_id
-    message_text = event.message.text
+
     reply_token = event.reply_token
-    
-    logger.info(f"從用戶 {user_id} 收到消息: {message_text}")
-    logger.info(f"回覆令牌: {reply_token}")
+    message_text = event.message.text
+
+    if event.source.type == 'user':
+        user_id = event.source.user_id
+        logger.info(f"從用戶 {user_id} 收到私訊: {message_text}")
+        # 直接處理用戶私訊
+        process_text_message(reply_token, message_text, user_id)
+
+    elif event.source.type == 'group':
+        group_id = event.source.group_id
+        user_id = event.source.user_id # 雖然是群組訊息，但還是有發送者 user_id
+        logger.info(f"從群組 {group_id} 中的用戶 {user_id} 收到訊息: {message_text}")
+
+        # 只處理以特定前綴開頭的群組訊息
+        if message_text.startswith('@機器人') or message_text.startswith('@bot'):
+            query = message_text.replace('@機器人', '').replace('@bot', '').strip()
+            logger.info(f"群組收到有效指令: {query}")
+            # 處理群組指令 (此處 user_id 主要用於可能的上下文，但群組共用一個回覆)
+            process_text_message(reply_token, query, group_id) # 注意：這裡的 context_id 用 group_id
+        else:
+            logger.info("群組訊息未包含指定前綴，已忽略")
+            return # 忽略非指令的群組訊息
+    else:
+        logger.info(f"收到未知來源類型的訊息: {event.source.type}")
+        return
+
+def process_text_message(reply_token, text_to_process, context_id):
+    """根據訊息內容處理並回覆 (user_id 或 group_id 作為 context_id)"""
+    logger.info(f"Process_text_message - 回覆令牌: {reply_token}, 內容: {text_to_process}, 上下文ID: {context_id}")
 
     # 直接回覆測試訊息
-    if message_text.lower() == "ping":
+    if text_to_process.lower() == "ping":
         logger.info("收到 ping 測試訊息，立即回覆")
         result = send_reply(reply_token, [TextMessage(text="pong! 我在這裡！")])
         if result:
@@ -351,64 +375,65 @@ def handle_message(event):
             logger.error("測試訊息回覆失敗")
         return
 
-    # 取得或初始化使用者的對話歷史
-    if user_id not in user_context:
-        user_context[user_id] = []
+    # 取得或初始化上下文的對話歷史
+    # 注意：群組的上下文 context_id 是 group_id，用戶私訊是 user_id
+    if context_id not in user_context:
+        user_context[context_id] = []
 
     # 判斷是否為新聞查詢
-    if "新聞" in message_text or "最新消息" in message_text:
-        query = message_text.replace("新聞", "").replace("最新消息", "").strip()
+    if "新聞" in text_to_process or "最新消息" in text_to_process:
+        query = text_to_process.replace("新聞", "").replace("最新消息", "").strip()
         if query:
             logger.info(f"開始查詢新聞關鍵字: {query}")
             news_result = get_news(query)
             reply = f"查詢「{query}」的新聞結果如下：\n\n{news_result}"
         else:
             reply = "請問你想查詢什麼關鍵字的新聞呢？"
-        messages = [TextMessage(text=reply)]
+        messages_to_send = [TextMessage(text=reply)]
     
     # 判斷是否為天氣查詢
-    elif "天氣" in message_text:
-        city = message_text.replace("天氣", "").strip()
+    elif "天氣" in text_to_process:
+        city = text_to_process.replace("天氣", "").strip()
         if city:
             logger.info(f"開始查詢城市天氣: {city}")
             weather_result = get_weather(city)
             reply = weather_result
         else:
             reply = "請問你想查詢哪個城市的天氣呢？例如：「台北天氣」"
-        messages = [TextMessage(text=reply)]
+        messages_to_send = [TextMessage(text=reply)]
     
     # 判斷是否為電影查詢
-    elif "電影" in message_text:
-        query = message_text.replace("電影", "").strip()
+    elif "電影" in text_to_process:
+        query = text_to_process.replace("電影", "").strip()
         if query:
             logger.info(f"開始查詢電影: {query}")
             movie_result = search_movies(query)
             reply = f"查詢「{query}」的電影結果如下：\n\n{movie_result}"
         else:
             reply = "請問你想查詢什麼電影呢？例如：「復仇者電影」"
-        messages = [TextMessage(text=reply)]
+        messages_to_send = [TextMessage(text=reply)]
     
     else:
-        # 將使用者訊息加入對話歷史
-        user_context[user_id].append({"role": "user", "parts": [message_text]})
+        # 將訊息加入對話歷史 (使用 context_id)
+        user_context[context_id].append({"role": "user", "parts": [text_to_process]})
 
         # 取得 Gemini 的回覆
         try:
-            logger.info("開始與 Gemini 模型對話")
-            response = gemini_model.generate_content(user_context[user_id])
+            logger.info(f"開始與 Gemini 模型對話 (上下文ID: {context_id})")
+            response = gemini_model.generate_content(user_context[context_id])
             gemini_reply = response.text
             logger.info(f"從 Gemini 收到回覆: {gemini_reply[:100]}...")
-            user_context[user_id].append({"role": "model", "parts": [gemini_reply]})
-            messages = [TextMessage(text=gemini_reply)]
+            user_context[context_id].append({"role": "model", "parts": [gemini_reply]})
+            messages_to_send = [TextMessage(text=gemini_reply)]
         except Exception as e:
             logger.error(f"Gemini 發生錯誤：{e}")
             logger.error(traceback.format_exc())
             reply = f"抱歉，Gemini 發生錯誤：{str(e)[:100]}"
-            messages = [TextMessage(text=reply)]
+            messages_to_send = [TextMessage(text=reply)]
 
-    # 回覆訊息給使用者
-    logger.info(f"準備回覆訊息: {str(messages)[:200]}")
-    result = send_reply(reply_token, messages)
+    # 回覆訊息給使用者/群組
+    logger.info(f"準備回覆訊息: {str(messages_to_send)[:200]}")
+    result = send_reply(reply_token, messages_to_send)
     if result:
         logger.info("成功回覆訊息")
     else:
@@ -452,70 +477,6 @@ def default_handler(event):
     # if reply_token:
     #     send_reply(reply_token, [TextMessage(text="抱歉，我不太明白您的意思。")])
     pass
-
-# 在群組中接收訊息
-@handler.add(MessageEvent, message=TextMessageContent)
-def handle_group_message(event):
-    """處理群組中的文字訊息"""
-    if not hasattr(event.source, 'group_id'):
-        return  # 跳過非群組訊息
-
-    logger.info(f"處理群組訊息事件: {event}")
-    
-    group_id = event.source.group_id
-    user_id = event.source.user_id
-    message_text = event.message.text
-    reply_token = event.reply_token
-    
-    # 只處理以特定前綴開頭的訊息，避免機器人回應所有群組訊息
-    if message_text.startswith('@機器人') or message_text.startswith('@bot'):
-        # 移除前綴
-        query = message_text.replace('@機器人', '').replace('@bot', '').strip()
-        logger.info(f"從群組用戶 {user_id} 收到有效指令: {query}")
-        
-        # 判斷查詢類型並處理
-        if "新聞" in query:
-            search_term = query.replace("新聞", "").strip()
-            if search_term:
-                result = get_news(search_term)
-                reply = f"查詢「{search_term}」的新聞結果如下：\n\n{result}"
-            else:
-                reply = "請問你想查詢什麼關鍵字的新聞呢？"
-        
-        elif "天氣" in query:
-            city = query.replace("天氣", "").strip()
-            if city:
-                result = get_weather(city)
-                reply = result
-            else:
-                reply = "請問你想查詢哪個城市的天氣呢？"
-        
-        elif "電影" in query:
-            search_term = query.replace("電影", "").strip()
-            if search_term:
-                result = search_movies(search_term)
-                reply = f"查詢「{search_term}」的電影結果如下：\n\n{result}"
-            else:
-                reply = "請問你想查詢什麼電影呢？"
-        
-        else:
-            # 使用 Gemini 處理其他查詢
-            try:
-                gemini_context = [{"role": "user", "parts": [query]}]
-                response = gemini_model.generate_content(gemini_context)
-                reply = response.text
-            except Exception as e:
-                logger.error(f"Gemini 發生錯誤：{e}")
-                logger.error(traceback.format_exc())
-                reply = f"抱歉，Gemini 發生錯誤：{str(e)[:100]}"
-        
-        # 回覆訊息給群組
-        logger.info(f"準備回覆群組訊息: {reply[:100]}...")
-        result = send_reply(reply_token, [TextMessage(text=reply)])
-        if result:
-            logger.info("成功回覆群組訊息")
-        else:
-            logger.error("回覆群組訊息失敗")
 
 if __name__ == "__main__":
     # 本地開發使用 debug 模式，生產環境中不使用
